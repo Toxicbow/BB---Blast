@@ -48,6 +48,8 @@ class Game {
         this.highScore = localStorage.getItem('bb-blast-highscore') || 0;
         this.level = 1;
         this.gameOver = false;
+        this.sounds = new SoundManager();
+        this.touchOffset = 60;
         
         this.shapes = [
             { name: 'dot', cells: [[0, 0]], color: '#fbbf24' },
@@ -174,12 +176,17 @@ class Game {
         const clientX = e.type.startsWith('touch') ? e.touches[0].clientX : e.clientX;
         const clientY = e.type.startsWith('touch') ? e.touches[0].clientY : e.clientY;
 
+        const offset = e.type.startsWith('touch') ? this.touchOffset : 0;
+
         this.dragOffset = {
             x: clientX - rect.left,
-            y: clientY - rect.top
+            y: clientY - rect.top + offset
         };
 
         target.classList.add('dragging');
+        target.style.transform = 'scale(1)'; // Ensure full size when dragging
+        target.style.transformOrigin = 'top left';
+        
         // Move to body to avoid clipping
         document.body.appendChild(target);
         this.updateDragPosition(clientX, clientY);
@@ -221,6 +228,8 @@ class Game {
             this.draggedBlock.element.classList.remove('dragging');
             this.draggedBlock.element.style.left = '';
             this.draggedBlock.element.style.top = '';
+            this.draggedBlock.element.style.transform = ''; // Return to preview scale
+            this.draggedBlock.element.style.transformOrigin = 'center';
             slot.appendChild(this.draggedBlock.element);
         }
 
@@ -365,7 +374,7 @@ class Game {
                 const nr = placement.row + dr;
                 const nc = placement.col + dc;
                 const cellEl = document.querySelector(`.cell[data-row="${nr}"][data-col="${nc}"]`);
-                if (cellEl) cellEl.style.background = 'rgba(255,255,255,0.3)';
+                if (cellEl) cellEl.style.background = `${this.draggedBlock.data.color}66`;
             });
         }
     }
@@ -470,6 +479,8 @@ class Game {
         this.score = 0;
         this.level = 1;
         this.gameOver = false;
+        this.sounds = new SoundManager();
+        this.touchOffset = 60; // Offset block above finger on mobile
         this.currentBlocks = [null, null, null];
         
         document.getElementById('game-over-overlay').classList.add('hidden');
