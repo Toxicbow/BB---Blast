@@ -253,10 +253,10 @@ class Game {
         for (let i = 0; i < 3; i++) {
             let shapePool = [];
             if (this.level === 1) {
-                // Easy/Medium shapes for Level 1
-                shapePool = this.shapes.filter(s => ['dot', 'i2h', 'i2v', 'i3h', 'i3v', 'l-a', 'l-b', 'l-c', 'l-d', 'o2x2'].includes(s.name));
+                // Level 1: Standard simple blocks (1x1, 2x2, straight lines)
+                shapePool = this.shapes.filter(s => ['dot', 'o2x2', 'i2h', 'i2v', 'i3h', 'i3v', 'i4h', 'i4v'].includes(s.name));
             } else {
-                // All shapes (including hard ones like T, Z, S, U, J, Big-O) for Level 2+
+                // Level 2+: All shapes (T, L, Z, U, Big-O, etc.)
                 shapePool = this.shapes;
             }
             if (shapePool.length === 0) shapePool = this.shapes;
@@ -458,14 +458,12 @@ class Game {
             this.comboCount = total;
             this.sounds.playClear(total * 2);
             
-            // Check adjacent locked/frozen cells to shatter/unlock them
+            // Shatter/unlock locked cells if they are inside cleared rows or columns
             const lockedCellsToUnlock = [];
             for (let r = 0; r < this.BOARD_SIZE; r++) {
                 for (let c = 0; c < this.BOARD_SIZE; c++) {
                     if (this.grid[r][c] === 'LOCKED') {
-                        const adjacentRowCleared = rowsToClear.some(cr => Math.abs(cr - r) === 1);
-                        const adjacentColCleared = colsToClear.some(cc => Math.abs(cc - c) === 1);
-                        if (adjacentRowCleared || adjacentColCleared) {
+                        if (rowsToClear.includes(r) || colsToClear.includes(c)) {
                             lockedCellsToUnlock.push({ r, c });
                         }
                     }
@@ -560,6 +558,25 @@ class Game {
     _triggerGameOver() {
         this.isOver = true;
         this.sounds.playGameOver();
+
+        const isNewRecord = this.score > this.highScore;
+        const titleEl = document.querySelector('.game-over-content h2');
+
+        if (isNewRecord) {
+            this.highScore = this.score;
+            localStorage.setItem('bb-blast-highscore', this.highScore);
+            if (titleEl) {
+                titleEl.textContent = 'YENİ REKOR!';
+                titleEl.classList.add('new-record-animation');
+            }
+            this.sounds._play(600, 'sine', 0.5, 0.25, 900);
+        } else {
+            if (titleEl) {
+                titleEl.textContent = 'OYUN BİTTİ';
+                titleEl.classList.remove('new-record-animation');
+            }
+        }
+
         document.getElementById('final-score').textContent = this.score;
         document.getElementById('final-best').textContent  = this.highScore;
         document.getElementById('game-over-overlay').classList.remove('hidden');
@@ -588,15 +605,11 @@ class Game {
         scoreEl.classList.add('score-pop');
         scoreEl.textContent = this.score.toString().padStart(4, '0');
 
-        if (this.score > this.highScore) {
-            this.highScore = this.score;
-            localStorage.setItem('bb-blast-highscore', this.highScore);
-        }
-        document.getElementById('high-score').textContent = this.highScore;
-        this._checkLevel();
+        document.getElementById('high-score').textContent = Math.max(this.score, this.highScore);
+        this.checkLevelUp();
     }
 
-    _checkLevel() {
+    checkLevelUp() {
         const targetLevel = Math.floor(this.score / 500) + 1;
         if (targetLevel !== this.level) {
             this.level = targetLevel;
@@ -611,12 +624,12 @@ class Game {
         document.body.className = `level-${visualLevel}`;
         
         const notification = document.getElementById('level-up-notification');
-        document.getElementById('level-text').textContent = `🌟 LEVEL ${this.level}!`;
+        document.getElementById('level-text').textContent = 'LEVEL UP!';
         notification.classList.remove('hidden');
         notification.style.animation = 'none';
         void notification.offsetHeight;
         notification.style.animation = '';
-        setTimeout(() => notification.classList.add('hidden'), 2000);
+        setTimeout(() => notification.classList.add('hidden'), 1000);
 
         // Spawn 1 or 2 locked/frozen cells on transitioning to Level 3+
         if (this.level >= 3) {

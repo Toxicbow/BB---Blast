@@ -475,7 +475,7 @@ body.level-3 .cell.occupied {
     transform: translate(-50%, -50%);
     z-index: 2000;
     pointer-events: none;
-    animation: fade-up-out 2s forwards;
+    animation: fade-up-out 1s forwards;
 }
 
 #level-text {
@@ -484,6 +484,18 @@ body.level-3 .cell.occupied {
     color: white;
     text-shadow: 0 0 20px var(--accent-color), 0 0 60px var(--accent-color);
     letter-spacing: -1px;
+}
+
+.new-record-animation {
+    animation: gold-glow 1s ease-in-out infinite alternate;
+    background: linear-gradient(135deg, #fbbf24, #f59e0b, #fbbf24) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+}
+
+@keyframes gold-glow {
+    from { filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.6)); }
+    to { filter: drop-shadow(0 0 25px rgba(251, 191, 36, 0.95)) brightness(1.2); }
 }
 
 /* ---- Keyframes ---- */
