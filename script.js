@@ -65,26 +65,88 @@ class SoundManager {
    ============================================= */
 class MusicManager {
     constructor() {
-        this.audio        = new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3');
+        this.tracks = {
+            1: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+            2: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
+            3: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3'
+        };
+
+        this.currentLevel = 1;
+        this.audio        = new Audio(this.tracks[1]);
         this.audio.loop   = true;
-        this.audio.volume = 0.35;
+        this.audio.volume = 0; // Start at 0 for fade-in
+        this.targetVolume = 0.35;
         this.playing      = false;
+        this.isMuted      = false;
+
         this._btn         = document.getElementById('music-btn');
         this._btn.addEventListener('click', () => this.toggle());
     }
 
     toggle() {
         if (this.playing) {
-            this.audio.pause();
-            this.playing      = false;
-            this._btn.textContent = '🔇';
-            this._btn.classList.remove('playing');
+            this.isMuted = true;
+            this.fadeVolume(0, 400, () => {
+                this.audio.pause();
+                this.playing      = false;
+                this._btn.textContent = '🔇';
+                this._btn.classList.remove('playing');
+            });
         } else {
+            this.isMuted = false;
             this.audio.play().catch(() => {});
             this.playing      = true;
             this._btn.textContent = '🎵';
             this._btn.classList.add('playing');
+            this.fadeVolume(this.targetVolume, 600);
         }
+    }
+
+    changeTrack(level) {
+        const targetLevel = level >= 3 ? 3 : level;
+        if (this.currentLevel === targetLevel) return;
+
+        const oldAudio = this.audio;
+        this.currentLevel = targetLevel;
+
+        this.audio      = new Audio(this.tracks[targetLevel]);
+        this.audio.loop = true;
+        this.audio.volume = 0;
+
+        if (this.playing && !this.isMuted) {
+            // Fade out old track
+            this.fadeVolumeOf(oldAudio, 0, 800, () => {
+                oldAudio.pause();
+            });
+
+            // Play and fade in new track
+            this.audio.play().catch(() => {});
+            this.fadeVolume(this.targetVolume, 1000);
+        } else {
+            oldAudio.pause();
+        }
+    }
+
+    fadeVolume(target, duration, onComplete) {
+        this.fadeVolumeOf(this.audio, target, duration, onComplete);
+    }
+
+    fadeVolumeOf(audioEl, target, duration, onComplete) {
+        const startVol = audioEl.volume;
+        const diff     = target - startVol;
+        const steps    = 20;
+        const stepTime = duration / steps;
+        let step       = 0;
+
+        const interval = setInterval(() => {
+            step++;
+            audioEl.volume = startVol + (diff * (step / steps));
+            if (step >= steps) {
+                clearInterval(interval);
+                audioEl.volume = target;
+                if (onComplete) onComplete();
+            }
+        }, stepTime);
     }
 }
 
@@ -180,11 +242,26 @@ class Game {
                 boardEl.appendChild(cell);
             }
         }
+
+        // If level >= 3, automatically spawn locked cells on board creation
+        if (this.level >= 3) {
+            this._spawnLockedCells(Math.floor(Math.random() * 2) + 1);
+        }
     }
 
     _generateNewBlocks() {
         for (let i = 0; i < 3; i++) {
-            const shape = this.shapes[Math.floor(Math.random() * this.shapes.length)];
+            let shapePool = [];
+            if (this.level === 1) {
+                // Easy/Medium shapes for Level 1
+                shapePool = this.shapes.filter(s => ['dot', 'i2h', 'i2v', 'i3h', 'i3v', 'l-a', 'l-b', 'l-c', 'l-d', 'o2x2'].includes(s.name));
+            } else {
+                // All shapes (including hard ones like T, Z, S, U, J, Big-O) for Level 2+
+                shapePool = this.shapes;
+            }
+            if (shapePool.length === 0) shapePool = this.shapes;
+
+            const shape = shapePool[Math.floor(Math.random() * shapePool.length)];
             this.currentBlocks[i] = { ...shape, id: Date.now() + i };
             this._renderBlock(i);
         }
@@ -381,6 +458,32 @@ class Game {
             this.comboCount = total;
             this.sounds.playClear(total * 2);
             
+            // Check adjacent locked/frozen cells to shatter/unlock them
+            const lockedCellsToUnlock = [];
+            for (let r = 0; r < this.BOARD_SIZE; r++) {
+                for (let c = 0; c < this.BOARD_SIZE; c++) {
+                    if (this.grid[r][c] === 'LOCKED') {
+                        const adjacentRowCleared = rowsToClear.some(cr => Math.abs(cr - r) === 1);
+                        const adjacentColCleared = colsToClear.some(cc => Math.abs(cc - c) === 1);
+                        if (adjacentRowCleared || adjacentColCleared) {
+                            lockedCellsToUnlock.push({ r, c });
+                        }
+                    }
+                }
+            }
+            
+            lockedCellsToUnlock.forEach(({ r, c }) => {
+                this.grid[r][c] = null;
+                const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+                if (cellEl) {
+                    cellEl.classList.remove('locked-cell');
+                    cellEl.classList.add('unlocked-flash');
+                    this._spawnParticles(cellEl.getBoundingClientRect(), '#22d3ee', 12);
+                    setTimeout(() => cellEl.classList.remove('unlocked-flash'), 600);
+                }
+                this.sounds._play(750, 'sine', 0.22, 0.14, 250);
+            });
+            
             let label = "LINE CLEAR!";
             if (total === 2) label = "DOUBLE CLEAR!";
             else if (total === 3) label = "TRIPLE CLEAR!";
@@ -494,25 +597,47 @@ class Game {
     }
 
     _checkLevel() {
-        let targetLevel = 1;
-        if (this.score >= 5000)     targetLevel = 3;
-        else if (this.score >= 500) targetLevel = 2;
+        const targetLevel = Math.floor(this.score / 500) + 1;
         if (targetLevel !== this.level) {
             this.level = targetLevel;
             this.sounds.playLevelUp();
             this._applyLevelTheme();
+            this.music.changeTrack(this.level);
         }
     }
 
     _applyLevelTheme() {
-        document.body.className = `level-${this.level}`;
+        const visualLevel = Math.min(this.level, 3);
+        document.body.className = `level-${visualLevel}`;
+        
         const notification = document.getElementById('level-up-notification');
-        document.getElementById('level-text').textContent = this.level === 3 ? '⚡ HYPER MODE!' : '🌟 LEVEL UP!';
+        document.getElementById('level-text').textContent = `🌟 LEVEL ${this.level}!`;
         notification.classList.remove('hidden');
         notification.style.animation = 'none';
         void notification.offsetHeight;
         notification.style.animation = '';
         setTimeout(() => notification.classList.add('hidden'), 2000);
+
+        // Spawn 1 or 2 locked/frozen cells on transitioning to Level 3+
+        if (this.level >= 3) {
+            this._spawnLockedCells(Math.floor(Math.random() * 2) + 1);
+        }
+    }
+
+    _spawnLockedCells(count) {
+        let spawned = 0;
+        for (let attempt = 0; attempt < 100 && spawned < count; attempt++) {
+            const r = Math.floor(Math.random() * this.BOARD_SIZE);
+            const c = Math.floor(Math.random() * this.BOARD_SIZE);
+            if (this.grid[r][c] === null) {
+                this.grid[r][c] = 'LOCKED';
+                const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+                if (cellEl) {
+                    cellEl.classList.add('locked-cell');
+                }
+                spawned++;
+            }
+        }
     }
 
     _showCombo(text) {
