@@ -151,22 +151,59 @@ class MusicManager {
 }
 
 /* =============================================
-   MAIN GAME CLASS
+   CHANGELOG DATA
    ============================================= */
+
+const CHANGELOG = [
+    {
+        version: 'v1.3',
+        date: '2026-06',
+        notes: [
+            'Dinamik seviye sistemi (Level 1-3+) eklendi.',
+            'Level 3\'te donmuş (❄️) hücreler ortaya çıkıyor.',
+            'Müzik parçaları level geçişlerinde otomatik değişiyor.',
+            'Ana menü tam ekran neon tasarımına dönüştürüldü.',
+            'Sürüm notları dinamik olarak JS ile yükleniyor.'
+        ]
+    },
+    {
+        version: 'v1.2',
+        date: '2026-05',
+        notes: [
+            'Ana Menü (başlangıç ekranı) eklendi.',
+            'Blok döndürme özelliği (çift tıklama / çift dokunma).',
+            'STREAK bonusu ve çoklu satır temizleme ödülleri.',
+            'Yeni Rekor animasyonu ve altın rengi efekt.'
+        ]
+    },
+    {
+        version: 'v1.1',
+        date: '2026-04',
+        notes: [
+            'Responsive düzen ve tam ekran düzeltmesi.',
+            'Parçacık (particle) efekt sistemi.',
+            'Web Audio API ile SFX sesleri.',
+            'Arka plan müziği ve mute butonu.'
+        ]
+    }
+];
+
 class Game {
     constructor() {
-        this.BOARD_SIZE    = 8;
-        this.grid          = this._emptyGrid();
-        this.score         = 0;
-        this.highScore     = parseInt(localStorage.getItem('bb-blast-highscore') || '0', 10);
-        this.level         = 1;
-        this.isOver        = false;
-        this.comboCount    = 0;
-        this.streakCount   = 0;
-        this.currentBlocks = [null, null, null];
-        this.draggedBlock  = null;
-        this.dragOffset    = { x: 0, y: 0 };
-        this.TOUCH_LIFT    = 65;
+        this.BOARD_SIZE       = 8;
+        this.grid             = this._emptyGrid();
+        this.score            = 0;
+        this.highScore        = parseInt(localStorage.getItem('bb-blast-highscore') || '0', 10);
+        this.level            = 1;
+        this.isOver           = false;
+        this.comboCount       = 0;
+        this.streakCount      = 0;
+        this.currentBlocks    = [null, null, null];
+        this.draggedBlock     = null;
+        this.dragOffset       = { x: 0, y: 0 };
+        this.TOUCH_LIFT       = 65;
+        this._eventsAttached  = false;  // Guard: prevent duplicate event listeners
+        this._levelingUp      = false;  // Guard: prevent rapid duplicate level-ups
 
         this.sounds = new SoundManager();
         this.music  = new MusicManager();
@@ -212,6 +249,8 @@ class Game {
         this._setupEvents();
         this._resizeCanvas();
         this._animateLoop();
+        this._renderChangelog();
+
         document.getElementById('restart-btn').addEventListener('click', () => this._reset());
         window.addEventListener('resize', () => this._resizeCanvas());
 
@@ -221,6 +260,10 @@ class Game {
                 const mainMenu = document.getElementById('main-menu');
                 if (mainMenu) {
                     mainMenu.classList.add('fade-out');
+                    // Remove from DOM after transition ends to prevent ghost element
+                    mainMenu.addEventListener('transitionend', () => {
+                        mainMenu.remove();
+                    }, { once: true });
                 }
                 document.querySelectorAll('.game-ui').forEach(el => el.classList.remove('hidden'));
                 if (!this.music.playing) {
@@ -228,6 +271,25 @@ class Game {
                 }
             });
         }
+    }
+
+    _renderChangelog() {
+        const list = document.getElementById('changelog-list');
+        if (!list) return;
+        list.innerHTML = '';
+        CHANGELOG.forEach((entry, idx) => {
+            const header = document.createElement('li');
+            header.style.cssText = `font-weight:700; color:#38bdf8; margin-bottom:2px; ${idx > 0 ? 'margin-top:8px;' : ''} font-size:0.75rem;`;
+            header.textContent = `${entry.version}  (${entry.date})`;
+            list.appendChild(header);
+
+            entry.notes.forEach(note => {
+                const li = document.createElement('li');
+                li.style.paddingLeft = '10px';
+                li.textContent = `• ${note}`;
+                list.appendChild(li);
+            });
+        });
     }
 
     _createBoard() {
@@ -313,6 +375,10 @@ class Game {
     }
 
     _setupEvents() {
+        // Guard: only attach global drag events once
+        if (this._eventsAttached) return;
+        this._eventsAttached = true;
+
         document.addEventListener('mousedown',  e => this._onDragStart(e));
         document.addEventListener('mousemove',  e => this._onDragMove(e));
         document.addEventListener('mouseup',    e => this._onDragEnd(e));
@@ -611,12 +677,15 @@ class Game {
 
     checkLevelUp() {
         const targetLevel = Math.floor(this.score / 500) + 1;
-        if (targetLevel !== this.level) {
-            this.level = targetLevel;
-            this.sounds.playLevelUp();
-            this._applyLevelTheme();
-            this.music.changeTrack(this.level);
-        }
+        // Guard: prevent duplicate triggers if level hasn't actually changed or is already processing
+        if (targetLevel === this.level || this._levelingUp) return;
+        this._levelingUp = true;
+        this.level = targetLevel;
+        this.sounds.playLevelUp();
+        this._applyLevelTheme();
+        this.music.changeTrack(this.level);
+        // Release guard after a short debounce
+        setTimeout(() => { this._levelingUp = false; }, 600);
     }
 
     _applyLevelTheme() {
