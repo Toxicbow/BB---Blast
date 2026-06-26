@@ -14,7 +14,7 @@
     --level-2-block: #0ea5e9;
     --level-3-block: #d946ef;
 
-    --grid-size: min(88vw, 54vh, 450px);
+    --grid-size: min(70vmin, 55vh);
     --cell-size: calc(var(--grid-size) / 8 - 4px);
     --gap: 4px;
     --music-btn-size: 40px;
@@ -44,7 +44,7 @@ body {
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     transition: background-color 1s ease;
 }
@@ -75,15 +75,14 @@ body.level-3::before {
 
 #game-container {
     width: 100%;
-    height: 100vh;
-    max-height: 100vh;
     max-width: 600px;
-    padding: 16px;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
-    align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    align-items: center;
+    box-sizing: border-box;
+    padding: 1rem;
     position: relative;
     z-index: 1;
     overflow: hidden;
@@ -233,8 +232,11 @@ header {
 /* ---- Board Layout ---- */
 #board-container {
     position: relative;
-    width: var(--grid-size);
-    height: var(--grid-size);
+    width: 70vmin;
+    height: 70vmin;
+    max-height: 55vh;
+    max-width: 55vh;
+    aspect-ratio: 1 / 1;
     background: var(--board-bg);
     border-radius: 16px;
     padding: var(--gap);
@@ -353,8 +355,10 @@ body.level-3 .cell.occupied {
     gap: 16px;
     width: 100%;
     height: min(24vw, 13vh, 110px);
-    margin-top: 8px;
     align-items: center;
+    flex-shrink: 0;
+    margin-top: auto;
+    padding-bottom: env(safe-area-inset-bottom);
 }
 
 .preview-slot {
