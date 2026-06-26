@@ -304,6 +304,7 @@ class Game {
 
     _createBoard() {
         const boardEl = document.getElementById('board');
+        // Safety: only touch the #board element's children, never its layout CSS
         boardEl.innerHTML = '';
         for (let r = 0; r < this.BOARD_SIZE; r++) {
             for (let c = 0; c < this.BOARD_SIZE; c++) {
@@ -314,11 +315,25 @@ class Game {
                 boardEl.appendChild(cell);
             }
         }
-
-        // If level >= 3, automatically spawn locked cells on board creation
+        // Spawn frozen cells for high levels
         if (this.level >= 3) {
             this._spawnLockedCells(Math.floor(Math.random() * 2) + 1);
         }
+    }
+
+    /**
+     * CENTRAL CELL ACCESSOR — the ONLY way to get a board cell element.
+     * Scoped strictly to #board children so the grid container (#board, #board-container)
+     * is structurally unreachable from any animation or state-change path.
+     *
+     * @param {number} r  Row index 0-7
+     * @param {number} c  Column index 0-7
+     * @returns {HTMLElement|null}
+     */
+    _cellEl(r, c) {
+        if (r < 0 || r >= this.BOARD_SIZE || c < 0 || c >= this.BOARD_SIZE) return null;
+        // Query scoped inside #board so parent containers are unreachable
+        return document.querySelector(`#board .cell[data-row="${r}"][data-col="${c}"]`);
     }
 
     _generateNewBlocks() {
@@ -488,29 +503,32 @@ class Game {
     }
 
     _placeBlock(row, col, blockData) {
-        // Stamp each placed cell with a placement-token so clearing
-        // timeouts can verify the cell hasn't been re-occupied before wiping it.
-        const placeToken = Date.now();
+        // Each call to _placeBlock increments the global clear-generation counter.
+        // Any pending clear-animation callback that carries an older generation will
+        // abort itself instead of wiping newly-placed cell state.
+        this._clearGen = (this._clearGen || 0) + 1;
+        const myGen = this._clearGen;
 
         blockData.cells.forEach(([dr, dc]) => {
             const nr = row + dr, nc = col + dc;
-            this.grid[nr][nc] = blockData.color;
-            const cellEl = document.querySelector(`.cell[data-row="${nr}"][data-col="${nc}"]`);
-            if (cellEl) {
-                cellEl.classList.add('occupied', 'placed-glow');
-                cellEl.style.setProperty('--block-color', blockData.color);
-                // Store token so we can detect if a new block overwrites this cell
-                cellEl.dataset.placeToken = placeToken;
-                this._spawnParticles(cellEl.getBoundingClientRect(), blockData.color, 4);
-                setTimeout(() => cellEl.classList.remove('placed-glow'), 500);
-            }
+            // ---- Data model update ----
+            this.grid[nr][nc] = blockData.color;  // only cell value; array structure untouched
+
+            // ---- DOM update: strictly cell-level via _cellEl() ----
+            const el = this._cellEl(nr, nc);
+            if (!el) return;
+            el.classList.add('occupied', 'placed-glow');
+            el.style.setProperty('--block-color', blockData.color);
+            el.dataset.gen = myGen;  // tag with generation for later guard checks
+            this._spawnParticles(el.getBoundingClientRect(), blockData.color, 4);
+            setTimeout(() => el.classList.remove('placed-glow'), 500);
         });
 
         this.sounds.playDrop();
         this.score += blockData.cells.length;
 
-        const clearedCount = this._checkLines();
-        if (clearedCount > 0) {
+        const clearedLines = this._processLineClear();
+        if (clearedLines > 0) {
             this.streakCount++;
             if (this.streakCount >= 2) {
                 setTimeout(() => {
@@ -522,125 +540,150 @@ class Game {
             this.streakCount = 0;
         }
 
+        // Score UI and level check — never touches grid container CSS
         this._updateScoreUI();
     }
 
-    _checkLines() {
+    /**
+     * _processLineClear — atomic, 4-phase line-clear pipeline.
+     *
+     * PHASE 1  Detect full rows and columns from data model only.
+     * PHASE 2  Pre-clear LOCKED cells that are in the affected lines:
+     *          remove locked-cell + occupied from their DOM nodes,
+     *          set grid[][] = null, play unlock effect.
+     * PHASE 3  Score calculation.
+     * PHASE 4  Animate and reset remaining (non-LOCKED) filled cells;
+     *          use clearGen snapshot to skip callbacks if a new block
+     *          lands on the same cell before the 420 ms expires.
+     *
+     * The preview panel (currentBlocks / slot elements) is NEVER referenced here.
+     * The grid container (#board / #board-container) is NEVER referenced here.
+     * All DOM queries go through _cellEl(r, c) which is scoped to #board children.
+     *
+     * @returns {number}  Total lines cleared (rows + cols).
+     */
+    _processLineClear() {
+        // ── PHASE 1: Detect ──────────────────────────────────────────────────────
         const rowsToClear = [];
         const colsToClear = [];
 
-        // A cell counts as occupying the line only if it is a placed color (not null).
-        // LOCKED cells ('LOCKED') also count as non-empty so that a fully-locked +
-        // filled row still clears, but we handle their visual removal separately.
         for (let r = 0; r < this.BOARD_SIZE; r++) {
-            if (this.grid[r].every(v => v !== null)) rowsToClear.push(r);
+            // grid[r] must be a full 8-element array (structure is never modified)
+            let full = true;
+            for (let c = 0; c < this.BOARD_SIZE; c++) {
+                if (this.grid[r][c] === null) { full = false; break; }
+            }
+            if (full) rowsToClear.push(r);
         }
+
         for (let c = 0; c < this.BOARD_SIZE; c++) {
-            if (this.grid.every(row => row[c] !== null)) colsToClear.push(c);
+            let full = true;
+            for (let r = 0; r < this.BOARD_SIZE; r++) {
+                if (this.grid[r][c] === null) { full = false; break; }
+            }
+            if (full) colsToClear.push(c);
         }
 
-        const total = rowsToClear.length + colsToClear.length;
-        if (total === 0) return 0;
+        const totalLines = rowsToClear.length + colsToClear.length;
+        if (totalLines === 0) return 0;
 
-        this.comboCount = total;
-        this.sounds.playClear(total * 2);
-
-        // --- Step 1: Identify and visually unlock LOCKED cells first ---
-        // We do this before zeroing the grid so we can still read 'LOCKED' values.
-        const lockedSet = new Set();
+        // ── PHASE 2: LOCKED-cell unlock (must run before grid is zeroed) ─────────
+        const lockedCoords = new Set();  // key: "r,c"
         for (let r = 0; r < this.BOARD_SIZE; r++) {
             for (let c = 0; c < this.BOARD_SIZE; c++) {
-                if (this.grid[r][c] === 'LOCKED' &&
-                    (rowsToClear.includes(r) || colsToClear.includes(c))) {
-                    lockedSet.add(`${r},${c}`);
+                if (
+                    this.grid[r][c] === 'LOCKED' &&
+                    (rowsToClear.includes(r) || colsToClear.includes(c))
+                ) {
+                    lockedCoords.add(`${r},${c}`);
+
+                    // Wipe data model value — array structure stays intact
+                    this.grid[r][c] = null;
+
+                    // DOM: only touch the individual cell via _cellEl()
+                    const el = this._cellEl(r, c);
+                    if (el) {
+                        el.classList.remove('locked-cell', 'occupied', 'placed-glow', 'clearing');
+                        el.style.removeProperty('--block-color');
+                        el.removeAttribute('data-gen');
+                        el.removeAttribute('data-clear-gen');
+                        el.classList.add('unlocked-flash');
+                        this._spawnParticles(el.getBoundingClientRect(), '#22d3ee', 12);
+                        setTimeout(() => el.classList.remove('unlocked-flash'), 600);
+                    }
                 }
             }
         }
+        if (lockedCoords.size > 0) {
+            this.sounds._play(750, 'sine', 0.22, 0.14, 250);
+        }
 
-        lockedSet.forEach(pos => {
-            const [r, c] = pos.split(',').map(Number);
-            // Wipe from data model immediately
-            this.grid[r][c] = null;
-            const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
-            if (cellEl) {
-                // Strip locked styling before the clear animation runs
-                cellEl.classList.remove('locked-cell', 'occupied');
-                cellEl.style.removeProperty('--block-color');
-                cellEl.classList.add('unlocked-flash');
-                this._spawnParticles(cellEl.getBoundingClientRect(), '#22d3ee', 12);
-                setTimeout(() => cellEl.classList.remove('unlocked-flash'), 600);
-            }
-        });
-        if (lockedSet.size > 0) this.sounds._play(750, 'sine', 0.22, 0.14, 250);
+        // ── PHASE 3: Score and audio ──────────────────────────────────────────────
+        this.comboCount = totalLines;
+        this.sounds.playClear(totalLines * 2);
 
-        // --- Step 2: Show combo label ---
+        const streakBonus = this.streakCount > 0 ? this.streakCount * 0.25 : 0;
+        const comboMult   = totalLines >= 2 ? totalLines * 0.5 : 1;
+        this.score       += Math.floor(totalLines * 100 * comboMult * (1 + streakBonus));
+
         let label = 'LINE CLEAR!';
-        if (total === 2)      label = 'DOUBLE CLEAR!';
-        else if (total === 3) label = 'TRIPLE CLEAR!';
-        else if (total >= 4)  label = 'MEGA CLEAR!';
+        if      (totalLines === 2) label = 'DOUBLE CLEAR!';
+        else if (totalLines === 3) label = 'TRIPLE CLEAR!';
+        else if (totalLines >= 4)  label = 'MEGA CLEAR!';
         this._showCombo(label);
 
-        // --- Step 3: Clear lines in data model + animate remaining cells ---
-        this._clearLines(rowsToClear, colsToClear, lockedSet);
-
-        return total;
-    }
-
-    _clearLines(rows, cols, alreadyClearedSet = new Set()) {
-        const total       = rows.length + cols.length;
-        const streakBonus = this.streakCount > 0 ? this.streakCount * 0.25 : 0;
-        const comboBonus  = total >= 2 ? total * 0.5 : 1;
-        this.score       += Math.floor(total * 100 * comboBonus * (1 + streakBonus));
-
-        // Build the full set of cells to clear and wipe the data model.
-        // Skip positions already handled by the LOCKED unlock step above.
-        const cellsToAnimate = new Set();
-        rows.forEach(r => {
-            for (let c = 0; c < this.BOARD_SIZE; c++) {
-                const key = `${r},${c}`;
-                this.grid[r][c] = null;        // always wipe model
-                if (!alreadyClearedSet.has(key)) cellsToAnimate.add(key);
-            }
+        // ── PHASE 4: Animate remaining cells and wipe data model ─────────────────
+        // Collect unique (r,c) pairs — use a Set to deduplicate row+col intersections
+        const toAnimate = new Set();
+        rowsToClear.forEach(r => {
+            for (let c = 0; c < this.BOARD_SIZE; c++) toAnimate.add(`${r},${c}`);
         });
-        cols.forEach(c => {
-            for (let r = 0; r < this.BOARD_SIZE; r++) {
-                const key = `${r},${c}`;
-                this.grid[r][c] = null;        // always wipe model
-                if (!alreadyClearedSet.has(key)) cellsToAnimate.add(key);
-            }
+        colsToClear.forEach(c => {
+            for (let r = 0; r < this.BOARD_SIZE; r++) toAnimate.add(`${r},${c}`);
         });
 
-        // Animate each affected cell individually.
-        // We stamp the cell with a clear-token; the setTimeout callback checks
-        // that the token is still current before wiping DOM state — this prevents
-        // the callback from accidentally clearing a *newly placed* block on the
-        // same cell if the player drops another block within the 420 ms window.
-        cellsToAnimate.forEach(pos => {
-            const [r, c] = pos.split(',').map(Number);
-            const el = document.querySelector(
-                `.cell[data-row="${r}"][data-col="${c}"]`
-            );
+        // Snapshot the generation counter at the moment this clear fires
+        const clearGen = this._clearGen;
+
+        toAnimate.forEach(key => {
+            const [r, c] = key.split(',').map(Number);
+
+            // Always zero out the data model (even if cell is in lockedCoords —
+            // it was already null, so this is a safe no-op for those).
+            this.grid[r][c] = null;  // value reset; array length/structure unchanged
+
+            // Skip DOM animation for cells already handled by the LOCKED phase
+            if (lockedCoords.has(key)) return;
+
+            const el = this._cellEl(r, c);
             if (!el) return;
 
-            // Only animate cells that are truly occupied (skip already-cleared LOCKED ones)
-            const clearToken = Date.now() + Math.random(); // unique per call
-            el.dataset.clearToken = clearToken;
+            // Tag cell with the clear generation for callback guard
+            el.dataset.clearGen = clearGen;
 
             el.classList.add('clearing');
             this._spawnParticles(el.getBoundingClientRect(), '#ffffff', 8);
 
             setTimeout(() => {
-                // Guard: if a new block was placed here during the 420 ms,
-                // placeToken will have been updated — skip the wipe.
-                if (el.dataset.clearToken != clearToken) return;
+                // Guard A: a newer _placeBlock call happened — a new block now
+                //          occupies this cell. Do NOT wipe its state.
+                if (parseInt(el.dataset.clearGen, 10) !== clearGen) return;
+
+                // Guard B: the cell was re-placed in this same generation
+                //          (edge-case: same gen, freshly occupied).
+                if (el.dataset.gen && parseInt(el.dataset.gen, 10) > clearGen) return;
+
+                // Safe to wipe — cell is genuinely empty in the data model
                 el.classList.remove('occupied', 'clearing', 'placed-glow');
                 el.style.removeProperty('--block-color');
-                delete el.dataset.clearToken;
-                delete el.dataset.placeToken;
+                el.removeAttribute('data-gen');
+                el.removeAttribute('data-clear-gen');
             }, 420);
         });
 
         if (this.level >= 3) this._triggerFireworks();
+
+        return totalLines;
     }
 
     _highlightCells(x, y) {
@@ -650,8 +693,8 @@ class Game {
         const valid = this._canPlace(placement.row, placement.col, this.draggedBlock.data);
         this.draggedBlock.data.cells.forEach(([dr, dc]) => {
             const nr = placement.row + dr, nc = placement.col + dc;
-            if (nr < 0 || nr >= this.BOARD_SIZE || nc < 0 || nc >= this.BOARD_SIZE) return;
-            const el = document.querySelector(`.cell[data-row="${nr}"][data-col="${nc}"]`);
+            // _cellEl already bounds-checks, so no need for a manual check here
+            const el = this._cellEl(nr, nc);
             if (!el) return;
             if (valid) {
                 el.style.setProperty('--block-color', this.draggedBlock.data.color);
@@ -714,10 +757,13 @@ class Game {
         this.isOver        = false;
         this.comboCount    = 0;
         this.streakCount   = 0;
+        this._clearGen     = 0;  // Reset generation counter
         this.currentBlocks = [null, null, null];
         this.particles     = [];
         document.getElementById('game-over-overlay').classList.add('hidden');
-        document.body.className = 'level-1';
+        // Use classList (not className) so unrelated body classes aren't wiped
+        ['level-1', 'level-2', 'level-3'].forEach(cls => document.body.classList.remove(cls));
+        document.body.classList.add('level-1');
         this._createBoard();
         this._updateScoreUI();
         this._generateNewBlocks();
@@ -776,10 +822,9 @@ class Game {
             const c = Math.floor(Math.random() * this.BOARD_SIZE);
             if (this.grid[r][c] === null) {
                 this.grid[r][c] = 'LOCKED';
-                const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
-                if (cellEl) {
-                    cellEl.classList.add('locked-cell');
-                }
+                // Use _cellEl() — structurally prevents touching the grid container
+                const el = this._cellEl(r, c);
+                if (el) el.classList.add('locked-cell');
                 spawned++;
             }
         }
