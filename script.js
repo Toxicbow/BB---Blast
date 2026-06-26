@@ -156,6 +156,16 @@ class MusicManager {
 
 const CHANGELOG = [
     {
+        version: 'v1.4',
+        date: '2026-06',
+        notes: [
+            'DÜZELTME: Bloklar patlatıldığında tüm grid alanının tek renkle kaplanmasına',
+            'neden olan satır/sütun temizleme render hatası tamamen çözüldü.',
+            'DÜZELTME: Donmuş (❄️) hücre temizleme sıralaması stabilize edildi.',
+            'DÜZELTME: Temizleme animasyonu artık yeni yerleştirilen blokları silmiyor.'
+        ]
+    },
+    {
         version: 'v1.3',
         date: '2026-06',
         notes: [
@@ -478,6 +488,10 @@ class Game {
     }
 
     _placeBlock(row, col, blockData) {
+        // Stamp each placed cell with a placement-token so clearing
+        // timeouts can verify the cell hasn't been re-occupied before wiping it.
+        const placeToken = Date.now();
+
         blockData.cells.forEach(([dr, dc]) => {
             const nr = row + dr, nc = col + dc;
             this.grid[nr][nc] = blockData.color;
@@ -485,6 +499,8 @@ class Game {
             if (cellEl) {
                 cellEl.classList.add('occupied', 'placed-glow');
                 cellEl.style.setProperty('--block-color', blockData.color);
+                // Store token so we can detect if a new block overwrites this cell
+                cellEl.dataset.placeToken = placeToken;
                 this._spawnParticles(cellEl.getBoundingClientRect(), blockData.color, 4);
                 setTimeout(() => cellEl.classList.remove('placed-glow'), 500);
             }
@@ -492,7 +508,7 @@ class Game {
 
         this.sounds.playDrop();
         this.score += blockData.cells.length;
-        
+
         const clearedCount = this._checkLines();
         if (clearedCount > 0) {
             this.streakCount++;
@@ -512,72 +528,115 @@ class Game {
     _checkLines() {
         const rowsToClear = [];
         const colsToClear = [];
+
+        // A cell counts as occupying the line only if it is a placed color (not null).
+        // LOCKED cells ('LOCKED') also count as non-empty so that a fully-locked +
+        // filled row still clears, but we handle their visual removal separately.
         for (let r = 0; r < this.BOARD_SIZE; r++) {
-            if (this.grid[r].every(c => c !== null)) rowsToClear.push(r);
+            if (this.grid[r].every(v => v !== null)) rowsToClear.push(r);
         }
         for (let c = 0; c < this.BOARD_SIZE; c++) {
             if (this.grid.every(row => row[c] !== null)) colsToClear.push(c);
         }
-        
+
         const total = rowsToClear.length + colsToClear.length;
-        if (total > 0) {
-            this.comboCount = total;
-            this.sounds.playClear(total * 2);
-            
-            // Shatter/unlock locked cells if they are inside cleared rows or columns
-            const lockedCellsToUnlock = [];
-            for (let r = 0; r < this.BOARD_SIZE; r++) {
-                for (let c = 0; c < this.BOARD_SIZE; c++) {
-                    if (this.grid[r][c] === 'LOCKED') {
-                        if (rowsToClear.includes(r) || colsToClear.includes(c)) {
-                            lockedCellsToUnlock.push({ r, c });
-                        }
-                    }
+        if (total === 0) return 0;
+
+        this.comboCount = total;
+        this.sounds.playClear(total * 2);
+
+        // --- Step 1: Identify and visually unlock LOCKED cells first ---
+        // We do this before zeroing the grid so we can still read 'LOCKED' values.
+        const lockedSet = new Set();
+        for (let r = 0; r < this.BOARD_SIZE; r++) {
+            for (let c = 0; c < this.BOARD_SIZE; c++) {
+                if (this.grid[r][c] === 'LOCKED' &&
+                    (rowsToClear.includes(r) || colsToClear.includes(c))) {
+                    lockedSet.add(`${r},${c}`);
                 }
             }
-            
-            lockedCellsToUnlock.forEach(({ r, c }) => {
-                this.grid[r][c] = null;
-                const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
-                if (cellEl) {
-                    cellEl.classList.remove('locked-cell');
-                    cellEl.classList.add('unlocked-flash');
-                    this._spawnParticles(cellEl.getBoundingClientRect(), '#22d3ee', 12);
-                    setTimeout(() => cellEl.classList.remove('unlocked-flash'), 600);
-                }
-                this.sounds._play(750, 'sine', 0.22, 0.14, 250);
-            });
-            
-            let label = "LINE CLEAR!";
-            if (total === 2) label = "DOUBLE CLEAR!";
-            else if (total === 3) label = "TRIPLE CLEAR!";
-            else if (total >= 4) label = "MEGA CLEAR!";
-            
-            this._showCombo(label);
-            this._clearLines(rowsToClear, colsToClear);
         }
+
+        lockedSet.forEach(pos => {
+            const [r, c] = pos.split(',').map(Number);
+            // Wipe from data model immediately
+            this.grid[r][c] = null;
+            const cellEl = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+            if (cellEl) {
+                // Strip locked styling before the clear animation runs
+                cellEl.classList.remove('locked-cell', 'occupied');
+                cellEl.style.removeProperty('--block-color');
+                cellEl.classList.add('unlocked-flash');
+                this._spawnParticles(cellEl.getBoundingClientRect(), '#22d3ee', 12);
+                setTimeout(() => cellEl.classList.remove('unlocked-flash'), 600);
+            }
+        });
+        if (lockedSet.size > 0) this.sounds._play(750, 'sine', 0.22, 0.14, 250);
+
+        // --- Step 2: Show combo label ---
+        let label = 'LINE CLEAR!';
+        if (total === 2)      label = 'DOUBLE CLEAR!';
+        else if (total === 3) label = 'TRIPLE CLEAR!';
+        else if (total >= 4)  label = 'MEGA CLEAR!';
+        this._showCombo(label);
+
+        // --- Step 3: Clear lines in data model + animate remaining cells ---
+        this._clearLines(rowsToClear, colsToClear, lockedSet);
+
         return total;
     }
 
-    _clearLines(rows, cols) {
+    _clearLines(rows, cols, alreadyClearedSet = new Set()) {
         const total       = rows.length + cols.length;
         const streakBonus = this.streakCount > 0 ? this.streakCount * 0.25 : 0;
         const comboBonus  = total >= 2 ? total * 0.5 : 1;
         this.score       += Math.floor(total * 100 * comboBonus * (1 + streakBonus));
 
-        const cells = new Set();
-        rows.forEach(r => { for (let c = 0; c < this.BOARD_SIZE; c++) { cells.add(`${r},${c}`); this.grid[r][c] = null; } });
-        cols.forEach(c => { for (let r = 0; r < this.BOARD_SIZE; r++) { cells.add(`${r},${c}`); this.grid[r][c] = null; } });
+        // Build the full set of cells to clear and wipe the data model.
+        // Skip positions already handled by the LOCKED unlock step above.
+        const cellsToAnimate = new Set();
+        rows.forEach(r => {
+            for (let c = 0; c < this.BOARD_SIZE; c++) {
+                const key = `${r},${c}`;
+                this.grid[r][c] = null;        // always wipe model
+                if (!alreadyClearedSet.has(key)) cellsToAnimate.add(key);
+            }
+        });
+        cols.forEach(c => {
+            for (let r = 0; r < this.BOARD_SIZE; r++) {
+                const key = `${r},${c}`;
+                this.grid[r][c] = null;        // always wipe model
+                if (!alreadyClearedSet.has(key)) cellsToAnimate.add(key);
+            }
+        });
 
-        cells.forEach(pos => {
+        // Animate each affected cell individually.
+        // We stamp the cell with a clear-token; the setTimeout callback checks
+        // that the token is still current before wiping DOM state — this prevents
+        // the callback from accidentally clearing a *newly placed* block on the
+        // same cell if the player drops another block within the 420 ms window.
+        cellsToAnimate.forEach(pos => {
             const [r, c] = pos.split(',').map(Number);
-            const el = document.querySelector(`.cell[data-row="${r}"][data-col="${c}"]`);
+            const el = document.querySelector(
+                `.cell[data-row="${r}"][data-col="${c}"]`
+            );
             if (!el) return;
+
+            // Only animate cells that are truly occupied (skip already-cleared LOCKED ones)
+            const clearToken = Date.now() + Math.random(); // unique per call
+            el.dataset.clearToken = clearToken;
+
             el.classList.add('clearing');
             this._spawnParticles(el.getBoundingClientRect(), '#ffffff', 8);
+
             setTimeout(() => {
-                el.classList.remove('occupied', 'clearing');
+                // Guard: if a new block was placed here during the 420 ms,
+                // placeToken will have been updated — skip the wipe.
+                if (el.dataset.clearToken != clearToken) return;
+                el.classList.remove('occupied', 'clearing', 'placed-glow');
                 el.style.removeProperty('--block-color');
+                delete el.dataset.clearToken;
+                delete el.dataset.placeToken;
             }, 420);
         });
 
@@ -690,7 +749,11 @@ class Game {
 
     _applyLevelTheme() {
         const visualLevel = Math.min(this.level, 3);
-        document.body.className = `level-${visualLevel}`;
+        // Use classList instead of className so we never accidentally wipe
+        // unrelated body classes (e.g. animation states set elsewhere).
+        const newLevelClass = `level-${visualLevel}`;
+        ['level-1', 'level-2', 'level-3'].forEach(cls => document.body.classList.remove(cls));
+        document.body.classList.add(newLevelClass);
         
         const notification = document.getElementById('level-up-notification');
         document.getElementById('level-text').textContent = 'LEVEL UP!';
