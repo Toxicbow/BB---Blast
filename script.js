@@ -100,6 +100,7 @@ class Game {
         this.level         = 1;
         this.isOver        = false;
         this.comboCount    = 0;
+        this.streakCount   = 0;
         this.currentBlocks = [null, null, null];
         this.draggedBlock  = null;
         this.dragOffset    = { x: 0, y: 0 };
@@ -151,6 +152,20 @@ class Game {
         this._animateLoop();
         document.getElementById('restart-btn').addEventListener('click', () => this._reset());
         window.addEventListener('resize', () => this._resizeCanvas());
+
+        const playBtn = document.getElementById('play-btn');
+        if (playBtn) {
+            playBtn.addEventListener('click', () => {
+                const mainMenu = document.getElementById('main-menu');
+                if (mainMenu) {
+                    mainMenu.classList.add('fade-out');
+                }
+                document.querySelectorAll('.game-ui').forEach(el => el.classList.remove('hidden'));
+                if (!this.music.playing) {
+                    this.music.toggle();
+                }
+            });
+        }
     }
 
     _createBoard() {
@@ -199,6 +214,23 @@ class Game {
             cell.style.gridColumn = c + 1;
             blockEl.appendChild(cell);
         });
+
+        // Double-click/tap rotation listeners
+        blockEl.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            this.rotateBlock(slotIndex);
+        });
+
+        let lastTap = 0;
+        blockEl.addEventListener('touchstart', (e) => {
+            const now = Date.now();
+            if (now - lastTap < 300) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.rotateBlock(slotIndex);
+            }
+            lastTap = now;
+        }, { passive: false });
 
         slot.appendChild(blockEl);
     }
@@ -307,16 +339,30 @@ class Game {
             const nr = row + dr, nc = col + dc;
             this.grid[nr][nc] = blockData.color;
             const cellEl = document.querySelector(`.cell[data-row="${nr}"][data-col="${nc}"]`);
-            cellEl.classList.add('occupied', 'placed-glow');
-            cellEl.style.setProperty('--block-color', blockData.color);
-            this._spawnParticles(cellEl.getBoundingClientRect(), blockData.color, 4);
-            setTimeout(() => cellEl.classList.remove('placed-glow'), 500);
+            if (cellEl) {
+                cellEl.classList.add('occupied', 'placed-glow');
+                cellEl.style.setProperty('--block-color', blockData.color);
+                this._spawnParticles(cellEl.getBoundingClientRect(), blockData.color, 4);
+                setTimeout(() => cellEl.classList.remove('placed-glow'), 500);
+            }
         });
 
         this.sounds.playDrop();
         this.score += blockData.cells.length;
-        this.comboCount = 0;
-        this._checkLines();
+        
+        const clearedCount = this._checkLines();
+        if (clearedCount > 0) {
+            this.streakCount++;
+            if (this.streakCount >= 2) {
+                setTimeout(() => {
+                    this.sounds.playCombo(this.streakCount);
+                    this._showCombo(`STREAK x${this.streakCount}!`);
+                }, 400);
+            }
+        } else {
+            this.streakCount = 0;
+        }
+
         this._updateScoreUI();
     }
 
@@ -329,22 +375,28 @@ class Game {
         for (let c = 0; c < this.BOARD_SIZE; c++) {
             if (this.grid.every(row => row[c] !== null)) colsToClear.push(c);
         }
-        if (rowsToClear.length > 0 || colsToClear.length > 0) {
-            const total = rowsToClear.length + colsToClear.length;
-            this.comboCount += total;
+        
+        const total = rowsToClear.length + colsToClear.length;
+        if (total > 0) {
+            this.comboCount = total;
             this.sounds.playClear(total * 2);
-            if (this.comboCount >= 2) {
-                this.sounds.playCombo(this.comboCount);
-                this._showCombo(this.comboCount);
-            }
+            
+            let label = "LINE CLEAR!";
+            if (total === 2) label = "DOUBLE CLEAR!";
+            else if (total === 3) label = "TRIPLE CLEAR!";
+            else if (total >= 4) label = "MEGA CLEAR!";
+            
+            this._showCombo(label);
             this._clearLines(rowsToClear, colsToClear);
         }
+        return total;
     }
 
     _clearLines(rows, cols) {
-        const total      = rows.length + cols.length;
-        const comboBonus = this.comboCount >= 2 ? this.comboCount * 0.5 : 1;
-        this.score      += Math.floor(total * 100 * (total > 1 ? total * comboBonus : 1));
+        const total       = rows.length + cols.length;
+        const streakBonus = this.streakCount > 0 ? this.streakCount * 0.25 : 0;
+        const comboBonus  = total >= 2 ? total * 0.5 : 1;
+        this.score       += Math.floor(total * 100 * comboBonus * (1 + streakBonus));
 
         const cells = new Set();
         rows.forEach(r => { for (let c = 0; c < this.BOARD_SIZE; c++) { cells.add(`${r},${c}`); this.grid[r][c] = null; } });
@@ -416,6 +468,7 @@ class Game {
         this.level         = 1;
         this.isOver        = false;
         this.comboCount    = 0;
+        this.streakCount   = 0;
         this.currentBlocks = [null, null, null];
         this.particles     = [];
         document.getElementById('game-over-overlay').classList.add('hidden');
@@ -462,10 +515,9 @@ class Game {
         setTimeout(() => notification.classList.add('hidden'), 2000);
     }
 
-    _showCombo(count) {
-        const labels = ['', '', 'DOUBLE!', 'TRIPLE!', 'ULTRA!', 'MEGA!!', 'INSANE!'];
+    _showCombo(text) {
         const el     = document.getElementById('combo-display');
-        el.textContent = labels[Math.min(count, labels.length - 1)] || `x${count} COMBO!`;
+        el.textContent = text;
         el.classList.remove('show');
         void el.offsetWidth;
         el.classList.add('show');
@@ -494,6 +546,40 @@ class Game {
                 life: 1.0,
                 decay: 0.025 + Math.random() * 0.025
             });
+        }
+    }
+
+    rotateBlock(slotIndex) {
+        const block = this.currentBlocks[slotIndex];
+        if (!block) return;
+
+        // Rotate cells clockwise: [r, c] -> [c, -r]
+        let rotatedCells = block.cells.map(([r, c]) => [c, -r]);
+
+        // Find min row and col to shift back to (0,0) origin
+        const minR = Math.min(...rotatedCells.map(([r, c]) => r));
+        const minC = Math.min(...rotatedCells.map(([r, c]) => c));
+
+        block.cells = rotatedCells.map(([r, c]) => [r - minR, c - minC]);
+
+        // Re-render the block in the slot
+        this._renderBlock(slotIndex);
+
+        // Play rotation sound
+        this.sounds._play(400, 'triangle', 0.1, 0.12, 600);
+
+        // Spawn small rotation particles around the slot
+        const slot = document.getElementById(`slot-${slotIndex}`);
+        if (slot) {
+            this._spawnParticles(slot.getBoundingClientRect(), block.color, 5);
+        }
+
+        // Re-check game over state because rotation might make a block placeable!
+        if (this.isOver) {
+            if (!this._checkGameOver()) {
+                this.isOver = false;
+                document.getElementById('game-over-overlay').classList.add('hidden');
+            }
         }
     }
 
